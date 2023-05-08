@@ -1,0 +1,163 @@
+---
+title: "PAINS Trade Value"
+author: "KwangEun Cho"
+date: "2023-01-12"
+output: html_document
+---
+
+## MLB 데이터 불러오기
+
+```{r}
+setwd("/Users/choeunsol/Python/PAINS 방중 프로젝트/최종 분석 데이터셋")
+tradevalue <- read.csv("df_tradevalues_final.csv") # tradevalue 닷컴 데이터
+minor_prospect_score <- read.csv("minor prospect.csv") # 팬그래프 유망주 2080 스케일
+batter_war <- read.csv("2019-2022 MLB 타자 WAR.csv") # 타자 fwar
+pitcher_war <- read.csv("2019-2022 MLB 투수 WAR.csv") # 투수 fwar
+```
+
+메이저 선수와 마이너 선수들을 나눠준다.
+
+## 메이저 레벨 선수들 처리
+
+### 정답 레이블 형성
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+major_tradevalue <- tradevalue %>% filter(level == "Majors")
+minor_tradevalue <- tradevalue %>% filter(level == "Minors")
+
+major_correct_values <- major_tradevalue %>% select(name, salary, "trade_value" = surplus) # 정답 레이블 - 메이저 레벨
+minor_correct_values <- minor_tradevalue %>% select(name, "trade_value" = surplus) # 정답 레이블 - 마이너 레벨
+```
+
+### 메이저 레벨 선수들 입력값 만들어주기
+
+```{r}
+batter_war <- batter_war %>% select("name" = Name, "season" = Season, WAR) %>% filter(season != 2020)
+pitcher_war <- pitcher_war %>% select("name" = Name, "season" = Season, WAR) %>% filter(season != 2020)
+
+# 시즌별로 데이터 펼치기
+
+batter_war <- batter_war %>% group_by(name, season) %>% mutate(row = row_number()) %>% pivot_wider(., names_from = "season", values_from = "WAR") %>% select(-row) # 2019, 2020, 2021 WAR 데이터(타자)
+pitcher_war <- pitcher_war %>% group_by(name, season) %>% mutate(row = row_number()) %>% pivot_wider(., names_from = "season", values_from = "WAR") %>% select(-row) # 2019, 2020, 2021 WAR 데이터(투수)
+
+war <- rbind(batter_war, pitcher_war)
+```
+
+### 트레이드 밸류 데이터와 합치기
+
+```{r}
+major_tradevalue <- as_tibble(major_tradevalue)
+
+# 이름 표기법 통일
+name <- major_tradevalue %>% select(name) %>% .$name
+name[10] <- "Tatis Jr., Fernando"
+name_element <- unlist(strsplit(name, ','))
+
+library(stringr)
+
+last_name <- name_element[seq(1, length(name_element), 2)]
+first_name <- name_element[seq(2, length(name_element), 2)]
+first_name <- str_replace(first_name, ' ', '')
+# 페르난도 타티스 주니어가 이상하게 되어있어서 수정
+full_name <- paste(first_name, last_name)
+
+major_tradevalue$name = full_name
+```
+
+```{r}
+join <- left_join(major_tradevalue, war, by = "name")
+# 투수들이 타석 기록이 있을 경우 두 행으로 출력하는데, 이를 합쳐주어야한다.
+join[is.na(join)] <- 0
+
+colnames(join)[c(12:14)] = c("fwar_2022", "fwar_2019", "fwar_2021")
+
+y_fwar <- join %>% group_by(name) %>% summarise(fwar_22 = sum(fwar_2022), fwar_19 = sum(fwar_2019), fwar_21 = sum(fwar_2021))
+
+major_input_data <- left_join(major_tradevalue, y_fwar, by = "name")
+major_input_data %>% write.csv('MLB Major Level Input Data.csv')
+```
+
+### 잘못 묶인 데이터 정리
+
+```{r}
+false_name <- major_input_data %>% filter(fwar_22 == 0 & fwar_19 == 0 & fwar_21 == 0) %>% select(name)
+false_name <- unlist(false_name)
+major_input_data %>% filter(name %in% false_name) %>% filter(control.years != 6) %>% select(name) %>% unlist()
+```
+
+해당 선수들의 오기된 WAR을 fangraphs에서 수작업으로 엑셀 파일에 기록함.
+
+### 포지션 정리
+
+해당 데이터셋의 투수들의 구분이 RHP, LHP, SP, LHRP, RHRP 등으로 되어있는데, 이를 간소화하여 SP / RP의 두 개의 카테고리로 분류하고자 한다.
+
+```{r}
+setwd('/Users/choeunsol/Python')
+major_dataset = read.csv("MLB Major Dataset.csv", header = TRUE)
+
+major_dataset %>% group_by(pos) %>% summarise(n = n())
+
+major_dataset %>% filter(pos %in% c('RHP', 'LHP'))
+
+major_dataset <- major_dataset %>% mutate(pos = case_when(pos %in% c('RHP', 'LHP', 'SP') ~ "SP", pos %in% c('LHRP', 'RHRP') ~ "RP", TRUE ~ pos))
+major_dataset %>% filter(pos =='SP')
+```
+
+## 마이너 옵션 삽입
+
+```{r}
+setwd("/Users/choeunsol/Python")
+minor_option <- read.csv("minor option.csv", header = TRUE)
+
+# 루이스 가르시아, 윌 스미스(중복 이름) 구분
+major_dataset <- major_dataset %>% mutate(name = case_when(X.1 == 55 ~ "Luis GarciaSP", X.1 == 332 ~ "Luis GarciaRP", X.1 == 413 ~ "Luis Garcia2B", X.1 == 40 ~ "Will SmithC", X.1 == 1227 ~ "Will SmithRP", X.1 == 639 ~ "Diego Castillo2B", X.1 == 325 ~ "Diego CastilloRP", TRUE ~ name))
+major_dataset[which(major_dataset$name == "Will SmithRP"),][,c(13:15)] <- c(-0.1, 1.2, 0.4)
+major_dataset[which(major_dataset$name == "Diego CastilloRP"),][,c(13:15)] <- c(0.3, 1.0, 0.7)
+major_dataset[which(major_dataset$name == "Diego Castillo2B"),][,c(13:15)] <- c(-0.1, 0, 0)
+
+minor_option_a <- minor_option %>% mutate(index = 1:820)
+
+minor_option_b <- minor_option_a %>% mutate(name = case_when(index == 154 ~ "Luis GarciaSP", index == 732 ~ "Luis GarciaRP", index == 799 ~ "Luis Garcia2B", index == 547 ~ "Will SmithC", index == 320 ~ "Diego CastilloRP", TRUE ~ name))
+
+major_dataset_input <- major_dataset[, -c(1,2)] ; minor_option_input <- minor_option_b[, c(1,2)]
+joinset <-left_join(major_dataset_input, minor_option_input, by = 'name')
+sum(is.na(joinset$options))
+joinset <- joinset[-which(duplicated(joinset$name)),]
+
+joinset_final <- joinset %>% mutate(options = case_when(options == 0 | options == NA ~ "No", TRUE ~ "Yes"))
+write.csv(joinset_final, "MLB 메이저레벨 분석용 데이터셋.csv")
+```
+
+## 마이너 레벨 처리
+
+```{r}
+# 이름 표기법 통일
+
+minor_tradevalue <- as_tibble(minor_tradevalue)
+
+# 이름 표기법 통일
+name <- minor_tradevalue %>% select(name) %>% .$name
+name[135] <- "Brown Jr., Eric"
+## 에릭 브라운 주니어가 이상하게 되어있어서 수정
+name_element <- unlist(strsplit(name, ','))
+
+last_name <- name_element[seq(1, length(name_element), 2)]
+first_name <- name_element[seq(2, length(name_element), 2)]
+first_name <- str_replace(first_name, ' ', '')
+full_name <- paste(first_name, last_name)
+
+minor_tradevalue$name = full_name
+```
+
+### 2080 스케일 스코어와 age 통합
+
+```{r}
+minor_tradevalue <- minor_tradevalue %>% select(name, pos, "trade_value" = median.trade.value)
+minor_prospect_score <- minor_prospect_score %>% select("name" = Name, "pos" = Pos, "age" = Age, "fv" = FV, "eta" = ETA)
+minor_prospect_score$age <- round(minor_prospect_score$age)
+
+
+```
